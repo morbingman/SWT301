@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/implot-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-default/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-default/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-default/_deps/implot-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-minsizerel/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-minsizerel/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-minsizerel/_deps/implot-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/implot-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-relwithdebinfo/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-relwithdebinfo/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-relwithdebinfo/_deps/implot-src" vcs="Git" />
+  </component>
+</project>
