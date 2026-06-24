@@ -190,8 +190,12 @@ void benchmark_algo_sng(const Algo &algo, sec_t budget, BenchmarkWriter &writer)
 
         if (call_time > budget)
         {
-            // this call alone exceeded the budget -- stop here, don't log it,
-            // previous n remains the answer
+            // this call exceeded the budget -- log it so the graph shows
+            // where the wall is, then stop (same as --cml behaviour)
+            writer.write_sample(algo.name, n.str(true), call_time.count(), result.str(true).size());
+            ++sample_count;
+            best_n = n;
+            best_time = call_time;
             break;
         }
 
