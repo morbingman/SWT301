@@ -1,5 +1,9 @@
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -12,6 +16,40 @@
 
 using big::number;
 using sec_t = std::chrono::duration<double>;
+
+// ---------------------------------------------------------------------------
+// Fast decimal digit count estimate.
+//
+// number::str(true) does a full double-dabble binary->decimal conversion,
+// which is O(bits * decimal_digits) -- effectively O(n^2) in digit count.
+// For benchmark logging we only need an approximate digit count (it's just
+// metadata in the CSV), so instead we compute it directly from the bit
+// length in O(digit_count): decimal_digits ~= bit_length * log10(2).
+// This is what was silently dominating field_ext/matmul_fastexp's measured
+// time at large n -- the "algorithm" time included an O(n^2) string
+// conversion just to count digits for the CSV.
+// ---------------------------------------------------------------------------
+
+std::size_t estimate_decimal_digits(const number &x)
+{
+    if (x.value.empty())
+        return 1;
+
+    using digit_t = number::int_t;
+    constexpr std::size_t digit_bits = sizeof(digit_t) * 8;
+
+    std::size_t bit_length = (x.value.size() - 1) * digit_bits;
+    digit_t top = x.value.back();
+    while (top)
+    {
+        ++bit_length;
+        top >>= 1;
+    }
+
+    // decimal_digits = floor(bit_length * log10(2)) + 1
+    static constexpr double LOG10_2 = 0.30102999566398119521;
+    return static_cast<std::size_t>(bit_length * LOG10_2) + 1;
+}
 
 struct Algo
 {
@@ -29,17 +67,10 @@ static const std::vector<Algo> ALL_ALGOS = {
 };
 
 // ---------------------------------------------------------------------------
-// shared timeout helper -- used by both single-value mode (to avoid hanging
-// forever on e.g. naive(50)) and benchmark mode (as a safety cap so one
-// runaway call can't stall the whole run indefinitely).
+// shared timeout helper
 // ---------------------------------------------------------------------------
 
-/* Runs fn(n) on a background thread and waits up to `cap` for it to finish.
- * Returns true and fills runtime/result if it completed in time.
- * Returns false on timeout; the thread is detached and left to finish or
- * die on its own (never forcibly killed -- that would be undefined behavior).
- */
-bool run_with_timeout(number (*fn)(number), number n, sec_t cap, sec_t &runtime, number &result)
+bool run_with_timeout(number (*fn)(number), const number& n, const sec_t cap, sec_t &runtime, number &result)
 {
     auto done = std::make_shared<std::atomic<bool>>(false);
     auto run_atomic = std::make_shared<std::atomic<double>>(0.0);
@@ -73,10 +104,10 @@ bool run_with_timeout(number (*fn)(number), number n, sec_t cap, sec_t &runtime,
 }
 
 // ---------------------------------------------------------------------------
-// single-value mode: compute F(n) with each selected algorithm once
+// single-value mode
 // ---------------------------------------------------------------------------
 
-void run_single(number n, const std::vector<Algo> &algos, sec_t cap)
+void run_single(const number& n, const std::vector<Algo> &algos, const sec_t cap)
 {
     std::cout << "Computing F_" << n.str(true) << " with each implementation:\n\n";
     std::cout << std::left << std::setw(16) << "algorithm"
@@ -103,34 +134,40 @@ void run_single(number n, const std::vector<Algo> &algos, sec_t cap)
 }
 
 // ---------------------------------------------------------------------------
-// benchmark mode: --cml (cumulative budget)
-// For each algorithm (run separately), keep growing n as long as the total
-// elapsed time across ALL calls so far stays within budget. Each sample is
-// written straight to the output file as it's produced (see run_benchmark).
+// index stepping
+// step_pct is the percentage to grow n by each iteration (e.g. 1 = +1%).
+// Below SMALL_SEARCH_LIMIT we always step by +1 regardless.
+// step_cap, if non-zero, caps the absolute step size so sampling never gets
+// too sparse at large n -- without it, at n in the millions even a 1% step
+// is a jump of tens of thousands. step_cap == 0 means no cap (default):
+// pure percentage growth, same behaviour as before this option existed.
+// Uses long double approximation -- off by at most 1, fine for index selection.
 // ---------------------------------------------------------------------------
 
-void benchmark_algo_cml(const Algo &algo, sec_t budget, BenchmarkWriter &writer)
-{
-    // mirrors eval.cpp's growth strategy: small step-by-step search first
-    // (gives fine-grained resolution for algorithms like `naive` that only
-    // reach small n), then geometric growth once past that, so fast
-    // algorithms aren't stuck doing millions of tiny +1 steps.
-    //
-    // This is a single continuous loop against one total time budget for
-    // the whole algorithm (not a fresh budget per call, and no per-call
-    // timeout wrapper -- thread-spawn overhead would dominate fast calls
-    // and badly skew the timing). The call in progress when the budget is
-    // exceeded is allowed to finish, so total elapsed time may run slightly
-    // over budget; the cumulative check is what keeps this from running away.
-    //
-    // This function knows nothing about how a sample becomes a line in a
-    // file -- it just hands each one to `writer`, which owns that entirely.
-    constexpr std::uint64_t small_search_limit = 200;
+static constexpr std::uint64_t SMALL_SEARCH_LIMIT = 200;
 
+static number next_n(const number &n, const int step_pct, const std::uint64_t step_cap)
+{
+    if (n < SMALL_SEARCH_LIMIT)
+        return n + 1;
+    const auto nd = static_cast<long double>(n);
+    auto delta = static_cast<std::uint64_t>(nd * step_pct / 100.0L);
+    if (delta < 1) delta = 1;
+    if (step_cap > 0 && delta > step_cap) delta = step_cap;
+    return n + delta;
+}
+
+// ---------------------------------------------------------------------------
+// benchmark mode: --cml (cumulative budget)
+// ---------------------------------------------------------------------------
+
+void benchmark_algo_cml(const Algo &algo, const sec_t budget, BenchmarkWriter &writer, const int step_pct, const std::uint64_t step_cap)
+{
     number n = 0;
     auto algo_start = std::chrono::steady_clock::now();
 
-    std::cout << "Benchmarking " << algo.name << " (cumulative budget)...\n";
+    std::cout << "Benchmarking " << algo.name << " (cumulative budget, step=" << step_pct
+               << "%, cap=" << (step_cap > 0 ? std::to_string(step_cap) : "none") << ")...\n";
 
     number best_n = 0;
     sec_t total_elapsed(0);
@@ -141,19 +178,16 @@ void benchmark_algo_cml(const Algo &algo, sec_t budget, BenchmarkWriter &writer)
         number result = algo.fn(n);
         sec_t now_elapsed = std::chrono::steady_clock::now() - algo_start;
 
-        // time_seconds here is cumulative elapsed time since this algorithm's run started
-        writer.write_sample(algo.name, n.str(true), now_elapsed.count(), result.str(true).size());
+        writer.write_sample(algo.name, n.str(true), now_elapsed.count(), estimate_decimal_digits(result));
         ++sample_count;
 
         best_n = n;
         total_elapsed = now_elapsed;
 
         if (now_elapsed >= budget)
-        {
-            break; // budget exhausted -- this call was allowed to finish, now stop
-        }
+            break;
 
-        n = (n < small_search_limit) ? (n + 1) : (n + (n >> 1) - (n >> 3));
+        n = next_n(n, step_pct, step_cap);
     }
 
     std::cout << "  reached n=" << best_n.str() << " in " << total_elapsed.count()
@@ -161,26 +195,18 @@ void benchmark_algo_cml(const Algo &algo, sec_t budget, BenchmarkWriter &writer)
 }
 
 // ---------------------------------------------------------------------------
-// benchmark mode: --sng (per-call budget, like eval.cpp)
-// For each algorithm (run separately), keep growing n as long as EACH
-// INDIVIDUAL call finishes within budget. Total wall-clock search time is
-// unbounded -- only a single call's own duration is checked. Stops the
-// moment one call exceeds the budget; that call is not counted as a sample,
-// and the previous n is reported as the result.
+// benchmark mode: --sng (per-call budget)
 // ---------------------------------------------------------------------------
 
-void benchmark_algo_sng(const Algo &algo, sec_t budget, BenchmarkWriter &writer)
+void benchmark_algo_sng(const Algo &algo, const sec_t budget, BenchmarkWriter &writer, const int step_pct, const std::uint64_t step_cap)
 {
-    // This function knows nothing about how a sample becomes a line in a
-    // file -- it just hands each one to `writer`, which owns that entirely.
-    constexpr std::uint64_t small_search_limit = 200;
-
     number n = 0;
     number best_n = 0;
     sec_t best_time(0);
     size_t sample_count = 0;
 
-    std::cout << "Benchmarking " << algo.name << " (per-call budget)...\n";
+    std::cout << "Benchmarking " << algo.name << " (per-call budget, step=" << step_pct
+               << "%, cap=" << (step_cap > 0 ? std::to_string(step_cap) : "none") << ")...\n";
 
     while (true)
     {
@@ -190,23 +216,21 @@ void benchmark_algo_sng(const Algo &algo, sec_t budget, BenchmarkWriter &writer)
 
         if (call_time > budget)
         {
-            // this call exceeded the budget -- log it so the graph shows
-            // where the wall is, then stop (same as --cml behaviour)
-            writer.write_sample(algo.name, n.str(true), call_time.count(), result.str(true).size());
+            // log the over-budget call so the graph shows where the wall is
+            writer.write_sample(algo.name, n.str(true), call_time.count(), estimate_decimal_digits(result));
             ++sample_count;
             best_n = n;
             best_time = call_time;
             break;
         }
 
-        // time_seconds here is this single call's own duration
-        writer.write_sample(algo.name, n.str(true), call_time.count(), result.str(true).size());
+        writer.write_sample(algo.name, n.str(true), call_time.count(), estimate_decimal_digits(result));
         ++sample_count;
 
         best_n = n;
         best_time = call_time;
 
-        n = (n < small_search_limit) ? (n + 1) : (n + (n >> 1) - (n >> 3));
+        n = next_n(n, step_pct, step_cap);
     }
 
     std::cout << "  reached n=" << best_n.str() << " (last call took " << best_time.count()
@@ -215,25 +239,17 @@ void benchmark_algo_sng(const Algo &algo, sec_t budget, BenchmarkWriter &writer)
 
 enum class BenchMode { Cumulative, PerCall };
 
-void run_benchmark(sec_t budget, const std::vector<Algo> &algos, const std::string &out_path, BenchMode mode)
+void run_benchmark(const sec_t budget, const std::vector<Algo> &algos, const std::string &out_path,
+                   const BenchMode mode, const int step_pct, std::uint64_t step_cap)
 {
     BenchmarkWriter writer(out_path);
 
     for (const auto &algo : algos)
     {
-        // each algorithm is benchmarked one at a time, fully sequentially,
-        // so a slow one can never block or skew another's timing.
-        // Samples go straight to `writer`, which persists them immediately
-        // (see BenchmarkWriter::write_sample), so nothing is lost even if
-        // the run is interrupted mid-algorithm.
         if (mode == BenchMode::Cumulative)
-        {
-            benchmark_algo_cml(algo, budget, writer);
-        }
+            benchmark_algo_cml(algo, budget, writer, step_pct, step_cap);
         else
-        {
-            benchmark_algo_sng(algo, budget, writer);
-        }
+            benchmark_algo_sng(algo, budget, writer, step_pct, step_cap);
     }
     writer.close();
 
@@ -278,9 +294,7 @@ std::vector<Algo> select_algos(const std::string &names_csv)
             }
         }
         if (!found)
-        {
             std::cerr << "Unknown algorithm: " << name << " (skipping)\n";
-        }
     }
     return selected;
 }
@@ -305,9 +319,27 @@ void print_help()
         "  --sng   Per-call budget. Only a single call's own duration is checked\n"
         "          against --time. Reaches much higher n, but total search time\n"
         "          is unbounded -- it keeps going until one call is too slow.\n"
+        "          The call that finally exceeds --time IS logged as the last\n"
+        "          sample (so the graph shows exactly where the wall was hit),\n"
+        "          then the run stops.\n"
         "\n"
         "OPTIONS:\n"
         "  --time <seconds>   Time budget (default: 5.0 for --cml, 1.0 for --sng)\n"
+        "  --step <percent>   Index growth per step, 1-100 (default: 38).\n"
+        "                     Lower = denser samples, but many more total calls\n"
+        "                     means a much longer sustained run -- on real\n"
+        "                     hardware this can be more exposed to thermal\n"
+        "                     throttling, which may cap --sng's reach lower\n"
+        "                     than a quick high-step run would.\n"
+        "  --step-cap <n>     Optional hard cap on the absolute step size,\n"
+        "                     1-100000 (default: none -- pure percentage growth).\n"
+        "                     Without a cap, a percentage step becomes a huge\n"
+        "                     jump once n is large (e.g. 1% of 4,000,000 is\n"
+        "                     40,000); a cap keeps the tail of the graph dense.\n"
+        "                     Lower values mean denser tails but longer runs --\n"
+        "                     every sample past the point where the cap kicks\n"
+        "                     in is a full recomputation, so a low cap can take\n"
+        "                     a long time once n reaches into the millions.\n"
         "  --algo <list>      Comma-separated algorithm names (default: all)\n"
         "  --out <file>       Output CSV path for --benchmark (default: benchmark.csv)\n"
         "  --quiet            Suppress progress output (used by FibinachoUI)\n"
@@ -315,9 +347,7 @@ void print_help()
         "\n"
         "AVAILABLE ALGORITHMS:\n";
     for (const auto &algo : ALL_ALGOS)
-    {
         std::cout << "  " << algo.name << "\n";
-    }
     std::cout <<
         "\n"
         "EXAMPLES:\n"
@@ -325,16 +355,20 @@ void print_help()
         "  Fibinacho 50 --algo linear,matmul_fastexp\n"
         "  Fibinacho --benchmark\n"
         "  Fibinacho --benchmark --sng --time 0.5 --algo naive\n"
-        "  Fibinacho --benchmark --cml --out results.csv\n";
+        "  Fibinacho --benchmark --cml --out results.csv\n"
+        "  Fibinacho --benchmark --sng --step 1\n"
+        "  Fibinacho --benchmark --sng --step-cap 50000\n";
 }
 
-int main(int argc, char *argv[])
+int main(const int argc, char *argv[])
 {
     bool benchmark_mode = false;
     bool quiet = false;
-    BenchMode bench_mode = BenchMode::Cumulative; // default per spec
+    BenchMode bench_mode = BenchMode::Cumulative;
     bool time_budget_set = false;
     double time_budget = 1.0;
+    int step_pct = 38; // default: ~37.5% approximated as 38%
+    std::uint64_t step_cap = 0; // 0 = no cap (default); otherwise clamped to [1, 100000]
     std::string algo_arg;
     std::string index_arg = "30";
     std::string out_path = "benchmark.csv";
@@ -347,37 +381,52 @@ int main(int argc, char *argv[])
             print_help();
             return 0;
         }
-        else if (arg == "--benchmark")
-        {
-            benchmark_mode = true;
-        }
-        else if (arg == "--quiet")
-        {
-            quiet = true;
-        }
-        else if (arg == "--cml")
-        {
-            bench_mode = BenchMode::Cumulative;
-        }
-        else if (arg == "--sng")
-        {
-            bench_mode = BenchMode::PerCall;
-        }
+        else if (arg == "--benchmark")  { benchmark_mode = true; }
+        else if (arg == "--quiet")      { quiet = true; }
+        else if (arg == "--cml")        { bench_mode = BenchMode::Cumulative; }
+        else if (arg == "--sng")        { bench_mode = BenchMode::PerCall; }
         else if (arg == "--time" && i + 1 < argc)
         {
             time_budget = std::stod(argv[++i]);
             time_budget_set = true;
         }
-        else if (arg == "--algo" && i + 1 < argc)
+        else if (arg == "--step" && i + 1 < argc)
         {
-            algo_arg = argv[++i];
+            step_pct = std::clamp(std::stoi(argv[++i]), 1, 100);
         }
-        else if (arg == "--out" && i + 1 < argc)
+        else if (arg == "--step-cap" && i + 1 < argc)
         {
-            out_path = argv[++i];
+            long long parsed = std::stoll(argv[++i]);
+            step_cap = static_cast<std::uint64_t>(std::clamp(parsed, 1LL, 100000LL));
         }
+        else if (arg == "--algo" && i + 1 < argc) { algo_arg = argv[++i]; }
+        else if (arg == "--out"  && i + 1 < argc) { out_path = argv[++i]; }
         else if (!arg.empty() && arg[0] != '-')
         {
+            // Positional argument: must be a plain non-negative integer (the
+            // Fibonacci index). number(std::string) does not validate its
+            // input -- non-digit characters silently corrupt its internal
+            // state instead of erroring, which can crash later. Check here
+            // instead of letting bad input reach the constructor.
+            const bool all_digits = !arg.empty() &&
+                std::ranges::all_of(arg, [](const unsigned char c) { return std::isdigit(c); });
+
+            if (!all_digits)
+            {
+                bool is_algo_name = std::ranges::any_of(ALL_ALGOS, [&](const Algo &a) { return arg == a.name; });
+
+                if (is_algo_name)
+                {
+                    std::cerr << "'" << arg << "' is an algorithm name, not an index -- "
+                                 "select it with --algo " << arg << " instead.\n";
+                }
+                else
+                {
+                    std::cerr << "Invalid index '" << arg << "': expected a non-negative integer "
+                                 "(use --help to see available options)\n";
+                }
+                return 1;
+            }
             index_arg = arg;
         }
         else
@@ -393,32 +442,24 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // per-mode default budgets, only applied if --time was not explicitly given
     if (!time_budget_set && benchmark_mode)
-    {
         time_budget = (bench_mode == BenchMode::Cumulative) ? 5.0 : 1.0;
-    }
 
     if (benchmark_mode)
     {
         if (!quiet)
         {
-            run_benchmark(sec_t(time_budget), algos, out_path, bench_mode);
+            run_benchmark(sec_t(time_budget), algos, out_path, bench_mode, step_pct, step_cap);
         }
         else
         {
-            // quiet mode: suppress per-algorithm progress lines, just run
-            struct NullWriter : BenchmarkWriter
-            {
-                using BenchmarkWriter::BenchmarkWriter;
-            };
             BenchmarkWriter writer(out_path);
             for (const auto &algo : algos)
             {
                 if (bench_mode == BenchMode::Cumulative)
-                    benchmark_algo_cml(algo, sec_t(time_budget), writer);
+                    benchmark_algo_cml(algo, sec_t(time_budget), writer, step_pct, step_cap);
                 else
-                    benchmark_algo_sng(algo, sec_t(time_budget), writer);
+                    benchmark_algo_sng(algo, sec_t(time_budget), writer, step_pct, step_cap);
             }
             writer.close();
         }

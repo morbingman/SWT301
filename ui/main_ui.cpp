@@ -96,9 +96,9 @@ struct Tab
         if (done) return false;
 
         anim_accum += dt;
-        size_t steps = static_cast<size_t>(anim_accum * SAMPLES_PER_SEC);
+        const auto steps = static_cast<size_t>(anim_accum * SAMPLES_PER_SEC);
         if (steps == 0) return false;
-        anim_accum -= steps / SAMPLES_PER_SEC;
+        anim_accum -= static_cast<double>(steps) / SAMPLES_PER_SEC;
 
         // find max samples across all series
         size_t max_samples = 0;
@@ -127,6 +127,7 @@ struct RunPanel
     // config widgets
     int  mode_idx     = 0;     // 0=cml, 1=sng
     float time_budget = 1.0f;
+    int  step_pct     = 38;    // index growth % per step (1=dense, 38=default, 100=coarse)
     bool  algo_sel[5] = { true, true, true, true, true };
     char  out_path[512] = "benchmark.csv";
 
@@ -141,14 +142,15 @@ struct RunPanel
         "naive", "linear", "matmul_simple", "matmul_fastexp", "field_ext"
     };
 
-    ui::RunConfig make_config() const
+    [[nodiscard]] ui::RunConfig make_config() const
     {
         ui::RunConfig cfg;
         cfg.mode        = (mode_idx == 0) ? ui::BenchMode::Cumulative : ui::BenchMode::PerCall;
         cfg.time_budget = static_cast<double>(time_budget);
+        cfg.step_pct    = step_pct;
         cfg.out_path    = out_path;
         for (int i = 0; i < 5; ++i)
-            if (algo_sel[i]) cfg.algos.push_back(ALGO_NAMES[i]);
+            if (algo_sel[i]) cfg.algos.emplace_back(ALGO_NAMES[i]);
         return cfg;
     }
 
@@ -194,7 +196,7 @@ static ImVec4 series_color(const std::string &name)
 
 static void draw_run_panel(RunPanel &panel, ui::Runner &runner,
                             std::vector<Tab> &tabs,
-                            std::function<void(Tab)> on_new_tab)
+                            const std::function<void(Tab)>& on_new_tab)
 {
     if (!panel.open) return;
 
@@ -214,6 +216,11 @@ static void draw_run_panel(RunPanel &panel, ui::Runner &runner,
 
     ImGui::SeparatorText("Time budget (seconds)");
     ImGui::SliderFloat("##budget", &panel.time_budget, 0.1f, 30.0f, "%.1f s");
+
+    ImGui::SeparatorText("Index step (% growth per sample)");
+    ImGui::SliderInt("##step", &panel.step_pct, 1, 100, "%d%%");
+    ImGui::SameLine();
+    ImGui::TextDisabled(panel.step_pct <= 5 ? "(dense)" : panel.step_pct >= 50 ? "(coarse)" : "(normal)");
 
     ImGui::SeparatorText("Algorithms");
     for (int i = 0; i < 5; ++i)
@@ -235,7 +242,7 @@ static void draw_run_panel(RunPanel &panel, ui::Runner &runner,
         ImGui::SameLine();
         // simple spinner
         static const char *frames[] = { "|", "/", "-", "\\" };
-        ImGui::Text("%s", frames[(int)(ImGui::GetTime() * 6) % 4]);
+        ImGui::Text("%s", frames[static_cast<int>(ImGui::GetTime() * 6) % 4]);
     }
     else
     {
@@ -249,7 +256,7 @@ static void draw_run_panel(RunPanel &panel, ui::Runner &runner,
 
             runner.start(
                 cfg,
-                [&panel](std::string line) { panel.push_line(line); },
+                [&panel](const std::string& line) { panel.push_line(line); },
                 [&panel](int code)
                 {
                     panel.running   = false;

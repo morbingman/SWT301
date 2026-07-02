@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #ifdef _WIN32
   #define POPEN  _popen
@@ -22,6 +23,7 @@ std::string Runner::build_args(const RunConfig &cfg)
     ss << " --benchmark";
     ss << (cfg.mode == BenchMode::Cumulative ? " --cml" : " --sng");
     ss << " --time " << cfg.time_budget;
+    ss << " --step " << cfg.step_pct;
     ss << " --quiet";
     ss << " --out \"" << cfg.out_path << "\"";
 
@@ -38,8 +40,8 @@ std::string Runner::build_args(const RunConfig &cfg)
     return ss.str();
 }
 
-Runner::Runner(const std::string &binary_path)
-    : binary_path_(binary_path)
+Runner::Runner(std::string binary_path)
+    : binary_path_(std::move(binary_path))
 {}
 
 Runner::~Runner()
@@ -48,8 +50,8 @@ Runner::~Runner()
 }
 
 void Runner::start(const RunConfig &cfg,
-                   std::function<void(std::string)> on_line,
-                   std::function<void(int)>         on_done)
+                   const std::function<void(std::string)>& on_line,
+                   const std::function<void(int)>&         on_done)
 {
     if (running_.load())
     {

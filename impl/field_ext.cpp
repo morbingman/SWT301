@@ -7,8 +7,8 @@ struct Zrt5
 {
     // a + b\sqrt{5}
     num a, b;
-    
-    Zrt5 operator *(const Zrt5 &x)
+
+    Zrt5 operator *(const Zrt5 &x) const
     {
         num bb = b * x.b;
         bb = (bb << 2) + bb;
@@ -47,9 +47,12 @@ number fibonacci_field_ext(number n)
             fib *= step;
             fib >>= 1;
         }
-        step *= step;
-        step >>= 1;
         n >>= 1;
+        if (n > 0)
+        {
+            step *= step;
+            step >>= 1;
+        }
     }
 
     return static_cast<number>(fib.b);

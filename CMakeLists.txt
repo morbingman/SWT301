@@ -4,6 +4,22 @@ project(Fibinacho CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Default to a Release build if none is specified. Without this, CMake's
+# default build type is "" (no optimization flags at all), which silently
+# produces a debug-speed binary even when you think you're building release.
+# This matters a lot here: the FFT multiply in field_ext leans heavily on
+# the optimizer (inlining, vectorization of std::complex ops) to hit its
+# real speed -- without -O2/-O3 it can end up SLOWER than the simple O(n^2)
+# multiply used by matmul_fastexp, which has much less for the optimizer to do.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+endif()
+
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------------

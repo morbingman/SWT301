@@ -1,3 +1,5 @@
+#include <utility>
+
 #include "../num/mulnum_simple.h"
 #include "../num/algorithms.h"
 
@@ -6,19 +8,19 @@ struct M2x2
 {
     num e00, e01, e10, e11;
     M2x2(num e00, num e01, num e10, num e11)
-        : e00(e00)
-        , e01(e01)
-        , e10(e10)
-        , e11(e11)
+        : e00(std::move(e00))
+        , e01(std::move(e01))
+        , e10(std::move(e10))
+        , e11(std::move(e11))
     {}
-    
-    M2x2 operator*(M2x2 const &o)
+
+    M2x2 operator*(M2x2 const &o) const
     {
-        return M2x2(
+        return {
                 e00*o.e00 + e01*o.e10,
                 e00*o.e01 + e01*o.e11,
                 e10*o.e00 + e11*o.e10,
-                e10*o.e01 + e11*o.e11);
+                e10*o.e01 + e11*o.e11};
     }
     M2x2 &operator*=(M2x2 const &o)
     {
@@ -36,8 +38,11 @@ number fibonacci_matmul_fastexp(number n)
         {
             fib *= step;
         }
-        step *= step;
         n >>= 1;
+        if (n > 0)
+        {
+            step *= step;
+        }
     }
     return static_cast<number>(fib.e00);
 }
